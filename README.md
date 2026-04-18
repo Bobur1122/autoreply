@@ -51,6 +51,14 @@ Session fayl (`*.session`) va `.env` ni hech kimga yubormang.
 
 Telegram qoidalari va kanal huquqlariga rioya qiling.
 
+## Serverga qo‘yish (interactive bo‘lmasa)
+
+Ba’zi serverlar `/app` ichida `*.session` (SQLite) faylini ochishga ruxsat bermaydi yoki login uchun kod/2FA kiritib bo‘lmaydi. Bunday holatda `StringSession` ishlating:
+
+1) Lokal kompyuterda bir marta login qiling (`python .\main.py`).
+2) Session string oling: `python .\export_session_string.py`
+3) Serverdagi `.env` ga qo‘ying: `TG_SESSION_STRING=...` va `NON_INTERACTIVE=1`.
+
 ## Zip qilib yuborish
 
 Yuborish uchun `.venv/`, `__pycache__/`, `*.session*`, `.env` kabi fayllarni zip’ga qo‘shmang (zip ham kichraymaydi, aksincha katta bo‘lib ketadi).
