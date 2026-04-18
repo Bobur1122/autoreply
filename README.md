@@ -59,6 +59,16 @@ Ba’zi serverlar `/app` ichida `*.session` (SQLite) faylini ochishga ruxsat ber
 2) Session string oling: `python .\export_session_string.py`
 3) Serverdagi `.env` ga qo‘ying: `TG_SESSION_STRING=...` va `NON_INTERACTIVE=1`.
 
+Render kabi platformalarda odatda `.env` fayl repoga kirmaydi. Shuning uchun Environment Variables bo‘limida quyilarni kiriting:
+
+- `TG_API_ID`, `TG_API_HASH`
+- `TG_SESSION_STRING` (lokalda olganingiz)
+- `SOURCE_CHATS`, `DEST_CHAT`
+- `REPLACE_LINK_WITH`, `REPLACE_PHONE_WITH`, `REPLACE_USERNAME_WITH`
+- `NON_INTERACTIVE=1`
+
+Agar Web Service qilib qo‘ysangiz, Render `PORT` beradi. Loyiha o‘zi avtomatik kichik health server ochadi (`/` -> `ok`) va service “alive” bo‘lib turadi. Yoki eng to‘g‘risi: Render’da Background Worker tanlang.
+
 ## Zip qilib yuborish
 
 Yuborish uchun `.venv/`, `__pycache__/`, `*.session*`, `.env` kabi fayllarni zip’ga qo‘shmang (zip ham kichraymaydi, aksincha katta bo‘lib ketadi).

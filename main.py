@@ -1,8 +1,10 @@
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from getpass import getpass
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
@@ -123,9 +125,51 @@ def sanitize_text(text: str, *, settings: Settings, entities: Optional[Iterable[
     return sanitized
 
 
+def _maybe_start_health_server() -> None:
+    port_raw = os.environ.get("PORT", "").strip()
+    if not port_raw:
+        return
+
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(f"WARNING: Invalid PORT={port_raw!r}; skipping health server.", flush=True)
+        return
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    def serve() -> None:
+        try:
+            httpd = HTTPServer(("0.0.0.0", port), Handler)
+        except OSError as e:
+            print(f"WARNING: Health server failed to bind on 0.0.0.0:{port}: {e}", flush=True)
+            return
+        httpd.serve_forever()
+
+    threading.Thread(target=serve, name="health-server", daemon=True).start()
+    print(f"Health server listening on 0.0.0.0:{port}", flush=True)
+
+
 async def main() -> None:
     settings = load_settings()
-    session = StringSession(settings.session_string) if settings.session_string else settings.session_name
+    print("Initializing...", flush=True)
+
+    try:
+        session = StringSession(settings.session_string) if settings.session_string else settings.session_name
+    except Exception as e:
+        raise SystemExit(
+            "Failed to parse TG_SESSION_STRING. Regenerate it locally with: "
+            "python export_session_string.py (copy/paste as ONE line, no quotes)."
+        ) from e
+
     client = TelegramClient(
         session,
         settings.api_id,
@@ -136,6 +180,7 @@ async def main() -> None:
     print("Userbot relay is running.", flush=True)
     print(f"Sources: {', '.join(settings.source_chats)}", flush=True)
     print(f"Dest: {settings.dest_chat}", flush=True)
+    _maybe_start_health_server()
     print("Connecting to Telegram...", flush=True)
 
     @client.on(events.NewMessage(chats=list(settings.source_chats)))
