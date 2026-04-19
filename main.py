@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import html
 import json
 import os
@@ -9,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -19,6 +21,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from telethon import TelegramClient, events, utils
 from telethon.errors import (
     AuthKeyDuplicatedError,
@@ -264,6 +267,69 @@ def _maybe_start_health_server() -> None:
     print(f"Health server listening on 0.0.0.0:{port}", flush=True)
 
 
+def _webhook_base_url() -> str:
+    # Prefer explicit config, fallback to Render-provided URL if available.
+    for key in ("WEBHOOK_BASE_URL", "RENDER_EXTERNAL_URL", "PUBLIC_BASE_URL"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _webhook_path() -> str:
+    path = os.environ.get("WEBHOOK_PATH", "/webhook").strip() or "/webhook"
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
+def _webhook_secret(settings: RuntimeSettings) -> str:
+    # Stable, non-reversible token derived from BOT_TOKEN (doesn't leak the token).
+    raw = os.environ.get("WEBHOOK_SECRET_TOKEN", "").strip()
+    if raw:
+        return raw
+    return hashlib.sha256(settings.bot_token.encode("utf-8")).hexdigest()
+
+
+async def _run_webhook_server(bot: Bot, dp: Dispatcher, settings: RuntimeSettings) -> None:
+    port_raw = os.environ.get("PORT", "").strip()
+    if not port_raw:
+        raise SystemExit("Webhook mode requires PORT (Render provides it automatically).")
+    port = int(port_raw)
+
+    base_url = _webhook_base_url().rstrip("/")
+    if not base_url:
+        raise SystemExit(
+            "Webhook mode requires WEBHOOK_BASE_URL (or Render's RENDER_EXTERNAL_URL). "
+            "Example: https://your-service.onrender.com"
+        )
+
+    webhook_path = _webhook_path()
+    webhook_url = f"{base_url}{webhook_path}"
+    secret_token = _webhook_secret(settings)
+
+    app = web.Application()
+    app.router.add_get("/", lambda _: web.Response(text="ok"))
+    app.router.add_get("/health", lambda _: web.Response(text="ok"))
+
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=secret_token).register(app, path=webhook_path)
+    setup_application(app, dp, bot=bot)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+
+    await bot.set_webhook(url=webhook_url, secret_token=secret_token, drop_pending_updates=True)
+    print(f"Webhook mode: {webhook_url}", flush=True)
+    print(f"Webhook server listening on 0.0.0.0:{port}", flush=True)
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
+
+
 def _config_from_dict(data: dict) -> AppConfig:
     cfg = AppConfig()
     for key, value in data.items():
@@ -423,7 +489,13 @@ def _command_name(text: str) -> str:
 async def main() -> None:
     settings = load_runtime_settings()
     print("Initializing...", flush=True)
-    _maybe_start_health_server()
+
+    # Render Web Service: use webhook (avoids TelegramConflictError from multiple getUpdates).
+    # Local / Background Worker: use polling.
+    force_polling = _parse_bool(os.environ.get("USE_POLLING", "0"))
+    use_webhook = (not force_polling) and bool(os.environ.get("PORT", "").strip()) and bool(_webhook_base_url())
+    if not use_webhook:
+        _maybe_start_health_server()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
@@ -434,12 +506,13 @@ async def main() -> None:
     except Exception as e:
         raise SystemExit(f"BOT_TOKEN ishlamayapti: {type(e).__name__}: {e}") from e
 
-    # If a webhook was previously set, polling (getUpdates) won't work.
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("Webhook cleared (polling mode).", flush=True)
-    except Exception as e:
-        print(f"WARNING: delete_webhook failed: {type(e).__name__}: {e}", flush=True)
+    if not use_webhook:
+        # If a webhook was previously set, polling (getUpdates) won't work.
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            print("Webhook cleared (polling mode).", flush=True)
+        except Exception as e:
+            print(f"WARNING: delete_webhook failed: {type(e).__name__}: {e}", flush=True)
 
     print(f"Loading config from DB_CHAT={settings.db_chat!r} ...", flush=True)
     config = await load_config(bot, settings.db_chat)
@@ -1099,12 +1172,15 @@ async def main() -> None:
             print(f"WARNING: relay failed to start: {type(e).__name__}: {e}", flush=True)
 
     print("Bot is running. Open your bot and send /start", flush=True)
-    print("Starting polling...", flush=True)
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        print(f"FATAL: polling crashed: {type(e).__name__}: {e}", flush=True)
-        raise
+    if use_webhook:
+        await _run_webhook_server(bot, dp, settings)
+    else:
+        print("Starting polling...", flush=True)
+        try:
+            await dp.start_polling(bot)
+        except Exception as e:
+            print(f"FATAL: polling crashed: {type(e).__name__}: {e}", flush=True)
+            raise
 
 
 if __name__ == "__main__":

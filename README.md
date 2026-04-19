@@ -38,7 +38,14 @@ Render → Service → Environment Variables:
 - `OWNER_ID` (tavsiya) — botga “🆔 Mening ID” yuboring va chiqqan id’ni qo‘ying
 - `NON_INTERACTIVE=1` (tavsiya)
 
-Yaxshisi Render’da **Background Worker** tanlang. Web Service bo‘lsa, Render `PORT` beradi va loyiha health endpoint (`/` → `ok`) ochadi.
+Ikki xil ishga tushirish bor:
+
+- **Background Worker (polling)** — oddiy `getUpdates`. Faqat **bitta** instansiya ishlasin (aks holda `TelegramConflictError` chiqadi).
+- **Web Service (webhook, tavsiya)** — Render `PORT` beradi va bot webhook orqali ishlaydi.
+  - `WEBHOOK_BASE_URL=https://<your-service>.onrender.com` qo‘ying (yoki Render `RENDER_EXTERNAL_URL` bersa, o‘zi oladi)
+  - Health: `/` → `ok`
+
+Agar siz botni boshqa joyda ham ishga tushirgan bo‘lsangiz (kompyuterda / boshqa hostingda), o‘shani o‘chiring — aks holda Telegram bitta bot token bilan 2 ta `getUpdates`’ga ruxsat bermaydi.
 
 ## 4) Botni sozlash (Telegram ichida)
 
@@ -63,4 +70,3 @@ Yaxshisi Render’da **Background Worker** tanlang. Web Service bo‘lsa, Render
 ```
 
 Natija: `project.zip`.
-
