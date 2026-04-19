@@ -47,6 +47,10 @@ Ikki xil ishga tushirish bor:
 
 Agar siz botni boshqa joyda ham ishga tushirgan bo‘lsangiz (kompyuterda / boshqa hostingda), o‘shani o‘chiring — aks holda Telegram bitta bot token bilan 2 ta `getUpdates`’ga ruxsat bermaydi.
 
+## Telegram limit (FloodWait)
+
+Agar log’da `FloodWaitError: A wait of N seconds is required` ko‘rsangiz, bu Render “uxlab qoldi” degani emas — bu Telegram userbot akkauntingizni vaqtinchalik limit qilgan bo‘ladi. Bot relay’ni avtomatik **N sekunddan keyin** qayta urunib ishga tushiradi.
+
 ## 4) Botni sozlash (Telegram ichida)
 
 1) Botga `/start`

@@ -34,6 +34,7 @@ from telethon.errors import (
 )
 from telethon.sessions import StringSession
 from telethon.tl.custom.qrlogin import QRLogin
+from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 from telethon.tl.types import MessageEntityMentionName, MessageEntityTextUrl
 
 CONFIG_PREFIX = "CONFIG_V1:"
@@ -48,7 +49,10 @@ URL_RE = re.compile(
 )
 USERNAME_RE = re.compile(r"(?i)(?<!\w)@[a-z0-9_]{5,32}\b")
 PHONE_RE = re.compile(r"(?x)(?<!\w)(\+?\d[\d\-\s\(\)]{7,}\d)\b")
-CHAT_REF_RE = re.compile(r"^(?:@[A-Za-z0-9_]{3,32}|-?\d{6,}|-100\d{6,})$")
+CHAT_REF_RE = re.compile(r"^(?:@[A-Za-z0-9_]{3,32}|-?\d{6,}|INVITE:[A-Za-z0-9_-]{8,})$")
+TME_C_RE = re.compile(r"(?i)^(?:https?://)?t\.me/c/(\d{6,})(?:/\d+)?/?$")
+TME_INVITE_RE = re.compile(r"(?i)^(?:https?://)?t\.me/(?:\+|joinchat/)([A-Za-z0-9_-]{8,})/?$")
+TME_USER_RE = re.compile(r"(?i)^(?:https?://)?t\.me/([A-Za-z0-9_]{3,32})(?:/.*)?$")
 
 
 @dataclass(frozen=True)
@@ -105,8 +109,31 @@ class ConfigStoreError(RuntimeError):
     pass
 
 
+class RelayDelayedError(RuntimeError):
+    def __init__(self, seconds: int) -> None:
+        self.seconds = int(seconds)
+        super().__init__(f"Telegram limit (FloodWait): {self.seconds}s kutish kerak.")
+
+
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _human_seconds(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = []
+    if days:
+        parts.append(f"{days} kun")
+    if hours:
+        parts.append(f"{hours} soat")
+    if minutes:
+        parts.append(f"{minutes} daqiqa")
+    if not parts:
+        parts.append(f"{sec} soniya")
+    return " ".join(parts)
 
 
 def _split_csv(value: str) -> List[str]:
@@ -114,8 +141,48 @@ def _split_csv(value: str) -> List[str]:
     return [p for p in parts if p]
 
 
-def _is_chat_ref(value: str) -> bool:
+def _normalize_chat_ref(value: str) -> Optional[str]:
     v = (value or "").strip()
+    if not v:
+        return None
+
+    # Drop URL query/fragment if user pasted a link.
+    v = v.split("?", 1)[0].split("#", 1)[0].strip()
+
+    # t.me/c/<internal_id>/<msg_id> (private channel/group message link) -> -100<internal_id>
+    m = TME_C_RE.match(v)
+    if m:
+        return f"-100{m.group(1)}"
+
+    # Invite link: t.me/+HASH or t.me/joinchat/HASH
+    m = TME_INVITE_RE.match(v)
+    if m:
+        return f"INVITE:{m.group(1)}"
+
+    # Public link: t.me/<username> -> @username
+    m = TME_USER_RE.match(v)
+    if m:
+        return f"@{m.group(1)}"
+
+    # Raw username
+    if v.startswith("@"):
+        return v
+
+    # Raw numeric id (e.g. -100...)
+    if re.fullmatch(r"-?\d{6,}", v):
+        return v
+
+    # Already-normalized invite token
+    if v.upper().startswith("INVITE:"):
+        token = v.split(":", 1)[1].strip()
+        token = token.split("?", 1)[0].split("#", 1)[0].strip()
+        return "INVITE:" + token
+
+    return None
+
+
+def _is_chat_ref(value: str) -> bool:
+    v = _normalize_chat_ref(value)
     if not v:
         return False
     return bool(CHAT_REF_RE.match(v))
@@ -410,12 +477,18 @@ class RelayManager:
         self._client: Optional[TelegramClient] = None
         self._task: Optional[asyncio.Task] = None
         self._dest_peer_id: Optional[int] = None
+        self._retry_task: Optional[asyncio.Task] = None
+        self._dest_peer: Optional[object] = None
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
     async def stop(self) -> None:
+        current = asyncio.current_task()
+        if self._retry_task is not None and self._retry_task is not current:
+            self._retry_task.cancel()
+            self._retry_task = None
         if self._client is not None:
             try:
                 await self._client.disconnect()
@@ -425,6 +498,53 @@ class RelayManager:
             self._task.cancel()
             self._task = None
         self._dest_peer_id = None
+        self._dest_peer = None
+
+    def _schedule_retry(self, config: AppConfig, seconds: int) -> None:
+        seconds = max(1, int(seconds))
+
+        if self._retry_task is not None and not self._retry_task.done():
+            self._retry_task.cancel()
+            self._retry_task = None
+
+        async def _worker() -> None:
+            print(f"Relay delayed by FloodWait: retry in {seconds}s ({_human_seconds(seconds)})", flush=True)
+            await asyncio.sleep(seconds)
+            try:
+                await self.start(config)
+            except RelayDelayedError as e:
+                # If Telegram keeps rate-limiting, reschedule again.
+                self._schedule_retry(config, e.seconds)
+            except Exception as e:
+                print(f"WARNING: relay retry failed: {type(e).__name__}: {e}", flush=True)
+
+        self._retry_task = asyncio.create_task(_worker())
+
+    async def _resolve_ref(self, client: TelegramClient, ref: str) -> object:
+        normalized = _normalize_chat_ref(ref) or ref
+
+        if normalized.upper().startswith("INVITE:"):
+            invite_hash = normalized.split(":", 1)[1].strip()
+            try:
+                checked = await client(CheckChatInviteRequest(invite_hash))
+                chat = getattr(checked, "chat", None)
+                if chat is not None:
+                    return await client.get_input_entity(chat)
+            except FloodWaitError:
+                raise
+            except Exception:
+                pass
+
+            imported = await client(ImportChatInviteRequest(invite_hash))
+            chats = getattr(imported, "chats", None) or []
+            if chats:
+                return await client.get_input_entity(chats[0])
+            raise RuntimeError("Invite link orqali chat topilmadi. Link noto‘g‘ri yoki ruxsat yo‘q.")
+
+        if re.fullmatch(r"-?\d{6,}", normalized):
+            return await client.get_input_entity(int(normalized))
+
+        return await client.get_input_entity(normalized)
 
     async def start(self, config: AppConfig) -> None:
         if not config.is_ready():
@@ -437,9 +557,19 @@ class RelayManager:
         except Exception as e:
             raise SystemExit("Invalid session_string. Re-run /setup to regenerate session.") from e
 
-        client = TelegramClient(session, int(config.api_id), str(config.api_hash), flood_sleep_threshold=60)
+        flood_threshold_raw = os.environ.get("FLOOD_SLEEP_THRESHOLD", "60").strip()
+        try:
+            flood_threshold = int(flood_threshold_raw)
+        except ValueError:
+            flood_threshold = 60
 
-        @client.on(events.NewMessage(chats=list(config.source_chats)))
+        client = TelegramClient(
+            session,
+            int(config.api_id),
+            str(config.api_hash),
+            flood_sleep_threshold=flood_threshold,
+        )
+
         async def handler(event: events.NewMessage.Event) -> None:
             message = event.message
             if message is None:
@@ -450,14 +580,20 @@ class RelayManager:
             raw_text = message.raw_text or ""
             cleaned_text = sanitize_text(raw_text, config=config, entities=message.entities)
 
-            if message.photo or message.document:
-                await client.send_file(
-                    config.dest_chat,
-                    file=message.media,
-                    caption=cleaned_text if cleaned_text else None,
-                )
-            else:
-                await client.send_message(config.dest_chat, cleaned_text)
+            try:
+                dest = self._dest_peer or config.dest_chat
+                if message.photo or message.document:
+                    await client.send_file(
+                        dest,
+                        file=message.media,
+                        caption=cleaned_text if cleaned_text else None,
+                    )
+                else:
+                    await client.send_message(dest, cleaned_text)
+            except FloodWaitError as e:
+                # Telethon auto-sleeps for waits <= flood_sleep_threshold; this is a safety fallback.
+                print(f"WARNING: FloodWait in relay send: sleep {e.seconds}s", flush=True)
+                await asyncio.sleep(max(1, int(getattr(e, "seconds", 1))))
 
         await client.connect()
         me = await client.get_me()
@@ -465,7 +601,18 @@ class RelayManager:
             await client.disconnect()
             raise SystemExit("Userbot session is actually a bot session. Re-run /setup with a user account.")
 
-        dest_entity = await client.get_entity(config.dest_chat)
+        # Pre-resolve chats once so Telethon doesn't try to resolve inside the update dispatch task.
+        # (Prevents "Task exception was never retrieved" on FloodWait/resolve errors.)
+        try:
+            source_entities = [await self._resolve_ref(client, chat) for chat in config.source_chats]
+            self._dest_peer = await self._resolve_ref(client, config.dest_chat or "")
+            dest_entity = await client.get_entity(self._dest_peer)
+        except FloodWaitError as e:
+            await client.disconnect()
+            self._schedule_retry(config, int(getattr(e, "seconds", 1)))
+            raise RelayDelayedError(int(getattr(e, "seconds", 1))) from e
+
+        client.add_event_handler(handler, events.NewMessage(chats=source_entities))
         self._dest_peer_id = utils.get_peer_id(dest_entity)
 
         self._client = client
@@ -566,6 +713,10 @@ async def main() -> None:
             "- 📤 Manzil — qayerga yuborish\n"
             "- 🧹 Almashtirish — link/telefon/@username ni almashtirish\n"
             "- ▶️ Ishga tushirish / ⏹ To‘xtatish\n\n"
+            "Manba/Manzil formatlari:\n"
+            "- <code>@username</code>\n"
+            "- <code>-100...</code> (private kanal/guruh id)\n"
+            "- <code>https://t.me/c/1234567890/1</code> (private post link → avtomatik -100... ga aylanadi)\n\n"
             "Qo‘shimcha buyruqlar (ixtiyoriy):\n"
             "/claim, /setup, /set_source, /set_dest, /set_replace, /start_relay, /stop_relay, /status, /cancel"
         )
@@ -655,11 +806,24 @@ async def main() -> None:
             if len(parts) < 2:
                 await message.answer("📥 Manba: /set_source @kanal1,@kanal2", reply_markup=_main_menu_kb())
                 return
-            sources = _split_csv(parts[1])
-            if not sources or not all(_is_chat_ref(s) for s in sources):
+            sources_raw = _split_csv(parts[1])
+            sources: List[str] = []
+            for s in sources_raw:
+                normalized = _normalize_chat_ref(s)
+                if not normalized or not _is_chat_ref(normalized):
+                    await message.answer(
+                        "❌ Noto‘g‘ri format.\n"
+                        "Misol: <code>@kanal1,@kanal2</code> yoki <code>-100...</code> yoki "
+                        "<code>https://t.me/c/1234567890/1</code>",
+                        reply_markup=_main_menu_kb(),
+                    )
+                    return
+                sources.append(normalized)
+            if not sources:
                 await message.answer(
                     "❌ Noto‘g‘ri format.\n"
-                    "Misol: <code>@kanal1,@kanal2</code> yoki <code>-100...</code>",
+                    "Misol: <code>@kanal1,@kanal2</code> yoki <code>-100...</code> yoki "
+                    "<code>https://t.me/c/1234567890/1</code>",
                     reply_markup=_main_menu_kb(),
                 )
                 return
@@ -688,11 +852,12 @@ async def main() -> None:
             if len(parts) < 2:
                 await message.answer("📤 Manzil: /set_dest @dest", reply_markup=_main_menu_kb())
                 return
-            dest = parts[1].strip()
-            if not _is_chat_ref(dest):
+            dest_raw = parts[1].strip()
+            dest = _normalize_chat_ref(dest_raw)
+            if not dest or not _is_chat_ref(dest):
                 await message.answer(
                     "❌ Noto‘g‘ri format.\n"
-                    "Misol: <code>@dest</code> yoki <code>-100...</code>",
+                    "Misol: <code>@dest</code> yoki <code>-100...</code> yoki <code>https://t.me/c/1234567890/1</code>",
                     reply_markup=_main_menu_kb(),
                 )
                 return
@@ -800,11 +965,24 @@ async def main() -> None:
         if sender_id in input_states:
             mode = input_states.pop(sender_id)
             if mode == "source":
-                sources = _split_csv(text)
-                if not sources or not all(_is_chat_ref(s) for s in sources):
+                sources_raw = _split_csv(text)
+                sources: List[str] = []
+                for s in sources_raw:
+                    normalized = _normalize_chat_ref(s)
+                    if not normalized or not _is_chat_ref(normalized):
+                        await message.answer(
+                            "❌ Noto‘g‘ri format.\n"
+                            "Misol: <code>@kanal1,@kanal2</code> yoki <code>-100...</code> yoki "
+                            "<code>https://t.me/c/1234567890/1</code>",
+                            reply_markup=_main_menu_kb(),
+                        )
+                        return
+                    sources.append(normalized)
+                if not sources:
                     await message.answer(
                         "❌ Noto‘g‘ri format.\n"
-                        "Misol: <code>@kanal1,@kanal2</code> yoki <code>-100...</code>",
+                        "Misol: <code>@kanal1,@kanal2</code> yoki <code>-100...</code> yoki "
+                        "<code>https://t.me/c/1234567890/1</code>",
                         reply_markup=_main_menu_kb(),
                     )
                     return
@@ -818,11 +996,12 @@ async def main() -> None:
                         await message.answer(f"❌ Relay xato: {type(e).__name__}: {e}", reply_markup=_main_menu_kb())
                 return
             if mode == "dest":
-                dest = text.strip()
-                if not _is_chat_ref(dest):
+                dest_raw = text.strip()
+                dest = _normalize_chat_ref(dest_raw)
+                if not dest or not _is_chat_ref(dest):
                     await message.answer(
                         "❌ Noto‘g‘ri format.\n"
-                        "Misol: <code>@dest</code> yoki <code>-100...</code>",
+                        "Misol: <code>@dest</code> yoki <code>-100...</code> yoki <code>https://t.me/c/1234567890/1</code>",
                         reply_markup=_main_menu_kb(),
                     )
                     return
