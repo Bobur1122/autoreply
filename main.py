@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import (
     KeyboardButton,
@@ -395,10 +396,25 @@ async def main() -> None:
     print("Initializing...", flush=True)
     _maybe_start_health_server()
 
-    bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
+    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
+    try:
+        me = await bot.get_me()
+        print(f"Bot connected as @{me.username} (id={me.id})", flush=True)
+    except Exception as e:
+        raise SystemExit(f"BOT_TOKEN ishlamayapti: {type(e).__name__}: {e}") from e
+
+    # If a webhook was previously set, polling (getUpdates) won't work.
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("Webhook cleared (polling mode).", flush=True)
+    except Exception as e:
+        print(f"WARNING: delete_webhook failed: {type(e).__name__}: {e}", flush=True)
+
+    print(f"Loading config from DB_CHAT={settings.db_chat!r} ...", flush=True)
     config = await load_config(bot, settings.db_chat)
+    print("Config loaded.", flush=True)
     relay = RelayManager()
     setup_states: Dict[int, SetupState] = {}
     input_states: Dict[int, str] = {}
@@ -989,7 +1005,12 @@ async def main() -> None:
             print(f"WARNING: relay failed to start: {type(e).__name__}: {e}", flush=True)
 
     print("Bot is running. Open your bot and send /start", flush=True)
-    await dp.start_polling(bot)
+    print("Starting polling...", flush=True)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"FATAL: polling crashed: {type(e).__name__}: {e}", flush=True)
+        raise
 
 
 if __name__ == "__main__":
@@ -997,3 +1018,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"FATAL: {type(e).__name__}: {e}", flush=True)
+        raise
