@@ -1,90 +1,66 @@
-# Telegram relay (userbot)
+# Telegram relay (bot + userbot)
 
-Bu loyiha **sizning Telegram akkauntingiz** orqali (`userbot`) bitta kanaldan kelgan xabarlarni boshqa kanalga yuboradi va xabardagi:
+Bu loyiha serverda **Telegram bot** sifatida ishlaydi va sozlamalarni Telegram ichidan (tugmalar/yozishmalar orqali) qabul qiladi. Keyin u **sizning Telegram akkauntingiz (userbot)** orqali manba kanal/guruhdan kelgan xabarlarni manzil kanal/guruhga yuboradi va xabardagi:
 
 - linklar
 - telefon raqamlar
-- `@username` lar
+- `@username`lar
 
 ni siz bergan qiymatlar bilan almashtiradi.
 
+## Muhim
+
+- Source kanaldagi postlarni oddiy bot ko‘ra olmaydi (admin bo‘lmasa). Shu sabab relay **userbot** orqali qilinadi.
+- Userbot sessiyasi (`StringSession`) maxfiy. Biz uni `DB_CHAT` ga **pinned** xabar qilib saqlaymiz. `DB_CHAT` faqat siz ko‘radigan private kanal/guruh bo‘lsin va botda **Pin messages** huquqi bo‘lsin.
+
 ## 1) Talablar
 
-- Python 3.10+
-- Telegram API ID va API HASH: `https://my.telegram.org`
-- Source kanalda o‘qish huquqi, destination kanalda yozish huquqi (admin bo‘lishingiz mumkin)
+- Python 3.11+ (Render uchun `runtime.txt` bor)
+- Bot token: `@BotFather`
+- Telegram API ID/HASH: `https://my.telegram.org` (buni bot ichida ulash paytida yuborasiz)
+- `DB_CHAT`: private kanal/guruh (bot admin bo‘lsin)
 
-## 2) O‘rnatish
+## 2) Lokal ishga tushirish
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-## 3) Sozlash
-
-`.env.example` ni `.env` ga ko‘chiring va to‘ldiring:
-
-- `TG_API_ID`, `TG_API_HASH`
-- (ixtiyoriy) `TG_PHONE`, `TG_PASSWORD` (2FA bo‘lsa)
-- `SOURCE_CHATS` (vergul bilan) — masalan: `@sourcechannel1,-1001234567890`
-- `DEST_CHAT` — masalan: `@destchannel` yoki `-100...`
-- `REPLACE_LINK_WITH`, `REPLACE_PHONE_WITH`, `REPLACE_USERNAME_WITH`
- 
-Ixtiyoriy:
-
-- `DRY_RUN=1` — yubormaydi, faqat log qiladi.
-
-## 4) Ishga tushirish
-
-```powershell
-.\.venv\Scripts\Activate.ps1
 python .\main.py
 ```
 
-Birinchi ishga tushirganda Telegram sizdan telefon raqam va SMS/Telegram kodini so‘raydi (session fayl shu papkada saqlanadi).
+## 3) Render’ga qo‘yish
 
-## Eslatma
+Render → Service → Environment Variables:
 
-Session fayl (`*.session`) va `.env` ni hech kimga yubormang.
+- `BOT_TOKEN`
+- `DB_CHAT` (masalan `@my_private_db_channel` yoki `-100...`)
+- `OWNER_ID` (tavsiya) — botga “🆔 Mening ID” yuboring va chiqqan id’ni qo‘ying
+- `NON_INTERACTIVE=1` (tavsiya)
 
-Telegram qoidalari va kanal huquqlariga rioya qiling.
+Yaxshisi Render’da **Background Worker** tanlang. Web Service bo‘lsa, Render `PORT` beradi va loyiha health endpoint (`/` → `ok`) ochadi.
 
-## Serverga qo‘yish (interactive bo‘lmasa)
+## 4) Botni sozlash (Telegram ichida)
 
-Ba’zi serverlar `/app` ichida `*.session` (SQLite) faylini ochishga ruxsat bermaydi yoki login uchun kod/2FA kiritib bo‘lmaydi. Bunday holatda `StringSession` ishlating:
-
-1) Lokal kompyuterda bir marta login qiling (`python .\main.py`).
-2) Session string oling: `python .\export_session_string.py`
-3) Serverdagi `.env` ga qo‘ying: `TG_SESSION_STRING=...` va `NON_INTERACTIVE=1`.
-
-Render kabi platformalarda odatda `.env` fayl repoga kirmaydi. Shuning uchun Environment Variables bo‘limida quyilarni kiriting:
-
-- `TG_API_ID`, `TG_API_HASH`
-- `TG_SESSION_STRING` (lokalda olganingiz)
-- `SOURCE_CHATS`, `DEST_CHAT`
-- `REPLACE_LINK_WITH`, `REPLACE_PHONE_WITH`, `REPLACE_USERNAME_WITH`
-- `NON_INTERACTIVE=1`
-
-Agar Web Service qilib qo‘ysangiz, Render `PORT` beradi. Loyiha o‘zi avtomatik kichik health server ochadi (`/` -> `ok`) va service “alive” bo‘lib turadi. Yoki eng to‘g‘risi: Render’da Background Worker tanlang.
+1) Botga `/start`
+2) `/claim` (owner o‘rnatish)
+3) “➕ Akkaunt ulash (userbot)”:
+   - `TG_API_ID` (raqam) yuborasiz
+   - `TG_API_HASH` (string) yuborasiz
+   - ulash usulini tanlaysiz:
+     - “🔳 QR orqali (tavsiya)” — linkni bosib Telegram’da tasdiqlaysiz, keyin “✅ Tekshirish”
+     - “📱 Telefon/kod orqali” — telefon yuborasiz, kod yuborasiz (Telegram buni bloklashi mumkin)
+4) “📥 Manba (source)” → `@kanal1,@kanal2` (yoki `-100...`)
+5) “📤 Manzil (dest)” → `@dest` (yoki `-100...`)
+6) “▶️ Ishga tushirish”
 
 ## Zip qilib yuborish
 
-Yuborish uchun `.venv/`, `__pycache__/`, `*.session*`, `.env` kabi fayllarni zip’ga qo‘shmang (zip ham kichraymaydi, aksincha katta bo‘lib ketadi).
-
-Tayyor zip yaratish:
+`.venv/`, `__pycache__/`, `*.session*`, `.env` ni zip’ga qo‘shmang.
 
 ```powershell
 .\pack.ps1
 ```
 
-Natija: `project.zip` (ichida `main.py` va `requirements.txt` root’da bo‘ladi).
+Natija: `project.zip`.
 
-Agar siz zip’ni boshqa server/bot orqali ishga tushirmoqchi bo‘lsangiz va u yerda `.env`/OTP/2FA kiritish imkoni bo‘lmasa, unda avval bu loyiha lokal kompyuteringizda 1 marta login qilib `*.session*` fayl yaratib oling. Keyin **secrets bilan** zip qiling:
-
-```powershell
-.\pack.ps1 -IncludeSecrets -Destination deploy.zip
-```
-
-Diqqat: `deploy.zip` ichida `.env` va `*.session*` bo‘ladi — bular maxfiy.

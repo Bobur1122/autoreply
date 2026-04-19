@@ -16,7 +16,8 @@ $include = @(
   "main.py",
   "requirements.txt",
   "README.md",
-  ".env.example"
+  ".env.example",
+  "runtime.txt"
 ) | Where-Object { Test-Path -LiteralPath $_ }
 
 if ($IncludeSecrets) {
