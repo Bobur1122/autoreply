@@ -21,6 +21,7 @@ from aiogram.types import (
 )
 from telethon import TelegramClient, events, utils
 from telethon.errors import (
+    AuthKeyDuplicatedError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     SessionPasswordNeededError,
@@ -443,6 +444,12 @@ async def main() -> None:
                 )
             return False
 
+    async def invalidate_userbot_session(message: Optional[Message] = None) -> None:
+        # Session got invalidated by Telegram (e.g. used from 2 IPs). Require re-setup.
+        config.enabled = False
+        config.session_string = None
+        await persist(message)
+
     def help_text() -> str:
         return (
             "ℹ️ Yordam\n\n"
@@ -652,6 +659,18 @@ async def main() -> None:
             await persist(message)
             try:
                 await relay.start(config)
+            except AuthKeyDuplicatedError:
+                await invalidate_userbot_session(message)
+                await message.answer(
+                    "❌ Sessiya bekor bo‘ldi (AuthKeyDuplicated).\n"
+                    "Sabab: userbot sessiyasi 2 ta IP/serverda bir vaqtda ishlatilgan.\n\n"
+                    "Yechim:\n"
+                    "1) Boshqa deploy/serverlarni to‘liq o‘chiring (faqat bitta joy qolsin).\n"
+                    "2) '➕ Akkaunt ulash (userbot)' ni qaytadan qiling (🔳 QR tavsiya).\n"
+                    "3) Keyin '▶️ Ishga tushirish'.",
+                    reply_markup=_main_menu_kb(),
+                )
+                return
             except Exception as e:
                 config.enabled = False
                 await persist(message)
@@ -1001,6 +1020,9 @@ async def main() -> None:
         try:
             await relay.start(config)
             print("Relay started from saved config.", flush=True)
+        except AuthKeyDuplicatedError:
+            await invalidate_userbot_session()
+            print("WARNING: userbot session invalidated (AuthKeyDuplicated). Re-setup required.", flush=True)
         except Exception as e:
             print(f"WARNING: relay failed to start: {type(e).__name__}: {e}", flush=True)
 
