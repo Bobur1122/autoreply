@@ -22,8 +22,11 @@ from aiogram.types import (
 from telethon import TelegramClient, events, utils
 from telethon.errors import (
     AuthKeyDuplicatedError,
+    FloodWaitError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
+    PhoneNumberInvalidError,
+    PhoneNumberFloodError,
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession
@@ -198,6 +201,31 @@ def _setup_qr_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         selective=True,
     )
+
+
+def _setup_code_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔁 Kodni qayta yuborish"), KeyboardButton(text="📩 SMS so‘rash")],
+            [KeyboardButton(text="📱 Raqamni o‘zgartirish")],
+            [KeyboardButton(text="❌ Bekor qilish")],
+        ],
+        resize_keyboard=True,
+        selective=True,
+    )
+
+
+def _sent_code_how(sent: object) -> str:
+    sent_type = getattr(sent, "type", None)
+    name = type(sent_type).__name__ if sent_type is not None else ""
+    # Telethon types: SentCodeTypeApp/Sms/Call/FlashCall/MissedCall/EmailCode, etc.
+    if "App" in name:
+        return "Telegram ilovasiga (Telegram service chat) yuborildi."
+    if "Sms" in name:
+        return "SMS orqali yuborildi."
+    if "Call" in name:
+        return "Telefon qo‘ng‘iroq orqali yuboriladi."
+    return "Telegram tomonidan yuborildi."
 
 
 def _is_menu_text(text: str, expected: str) -> bool:
@@ -885,6 +913,7 @@ async def main() -> None:
                 await temp.connect()
                 try:
                     sent = await temp.send_code_request(st.phone)
+                    how = _sent_code_how(sent)
                 except Exception as e:
                     await temp.disconnect()
                     setup_states.pop(sender_id, None)
@@ -895,8 +924,11 @@ async def main() -> None:
                 st.stage = "code"
                 await message.answer(
                     "✅ Kod yuborildi.\n"
-                    "Kodni yuboring (orasiga  nuqta qo'shib yuboring masalan 1.2.3.4.5.6).\n\n"
+                    "Kodni yuboring (faqat raqam).\n\n"
+                    f"Qayerga ketdi: {how}\n\n"
+                    "Eslatma: agar tasodifan bo‘sh joy/nuqta/`-` aralashib ketsa ham mayli — bot raqamlarni ajratib oladi.\n"
                     "Lekin xavfsizlik uchun 🔳 QR usuli tavsiya.",
+                    reply_markup=_setup_code_kb(),
                 )
                 return
 
@@ -905,6 +937,46 @@ async def main() -> None:
                     setup_states.pop(sender_id, None)
                     await message.answer("❌ Xatolik. /setup ni qaytadan boshlang.", reply_markup=_main_menu_kb())
                     return
+
+                if _is_menu_text(text, "🔁 Kodni qayta yuborish"):
+                    try:
+                        sent = await st.temp_client.send_code_request(st.phone)
+                        st.phone_code_hash = getattr(sent, "phone_code_hash", st.phone_code_hash)
+                        await message.answer(f"✅ Kod qayta yuborildi. {_sent_code_how(sent)}", reply_markup=_setup_code_kb())
+                    except FloodWaitError as e:
+                        await message.answer(f"⏳ Juda ko‘p urinish. {e.seconds} soniya kuting.", reply_markup=_setup_code_kb())
+                    except (PhoneNumberInvalidError, PhoneNumberFloodError) as e:
+                        await message.answer(f"❌ Telefon xato/cheklov: {type(e).__name__}: {e}", reply_markup=_setup_code_kb())
+                    except Exception as e:
+                        await message.answer(f"❌ Qayta yuborilmadi: {type(e).__name__}: {e}", reply_markup=_setup_code_kb())
+                    return
+
+                if _is_menu_text(text, "📩 SMS so‘rash"):
+                    try:
+                        sent = await st.temp_client.send_code_request(st.phone, force_sms=True)
+                        st.phone_code_hash = getattr(sent, "phone_code_hash", st.phone_code_hash)
+                        await message.answer(f"✅ SMS so‘raldi. {_sent_code_how(sent)}", reply_markup=_setup_code_kb())
+                    except FloodWaitError as e:
+                        await message.answer(f"⏳ Juda ko‘p urinish. {e.seconds} soniya kuting.", reply_markup=_setup_code_kb())
+                    except Exception as e:
+                        await message.answer(f"❌ SMS so‘ralmadi: {type(e).__name__}: {e}", reply_markup=_setup_code_kb())
+                    return
+
+                if _is_menu_text(text, "📱 Raqamni o‘zgartirish"):
+                    try:
+                        await st.temp_client.disconnect()
+                    except Exception:
+                        pass
+                    st.temp_client = None
+                    st.phone = None
+                    st.phone_code_hash = None
+                    st.stage = "phone"
+                    await message.answer(
+                        "📱 Yangi telefon raqam yuboring. Misol: <code>+998901234567</code>",
+                        reply_markup=ReplyKeyboardRemove(),
+                    )
+                    return
+
                 code = re.sub(r"\D+", "", text)
                 await _safe_delete(message)
                 try:
